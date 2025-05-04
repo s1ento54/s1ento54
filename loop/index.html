@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Time Loop</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* Prevent default body scrolling */
+            font-family: 'Inter', sans-serif; /* Use Inter font */
+            background-color: #111; /* Dark background */
+            color: #eee;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100vh; /* Full viewport height */
+        }
+        canvas {
+            display: block; /* Remove extra space below canvas */
+            width: 100%;
+            height: 100%;
+        }
+        #info-overlay {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 20px;
+            background-color: rgba(0, 0, 0, 0.6);
+            border-radius: 8px; /* Rounded corners */
+            text-align: center;
+            font-size: 1.1em;
+            pointer-events: none; /* Allow clicks/scrolls through */
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.9em;
+            color: #aaa;
+            pointer-events: none;
+        }
+        .escaped-message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 3em;
+            font-weight: bold;
+            color: #0f0; /* Bright green for success */
+            text-shadow: 0 0 10px #0f0;
+            display: none; /* Hidden initially */
+            text-align: center;
+            padding: 20px;
+            background-color: rgba(0, 0, 0, 0.7);
+            border-radius: 15px;
+        }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="container">
+        <div id="info-overlay">Time: <span id="time-value">0.00</span></div>
+        <div id="instructions">Scroll to control time. Align the objects to escape.</div>
+        <div id="escaped-message" class="escaped-message">You Escaped the Loop!</div>
+        </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+
+    <script>
+        // --- Global Variables ---
+        let scene, camera, renderer;
+        let cubes = []; // Array to hold our animating cubes
+        let timeProgress = 0; // Represents the current point in the time loop (0 to 100)
+        const maxTime = 100;
+        const escapeTime = 50; // The specific time the alignment happens
+        const alignmentTolerance = 0.1; // How close objects need to be to count as aligned
+        let isEscaped = false; // Flag to check if the player has won
+        let scrollSensitivity = 0.05; // How much scroll affects time
+
+        // DOM Elements
+        const container = document.getElementById('container');
+        const timeValueSpan = document.getElementById('time-value');
+        const escapedMessageDiv = document.getElementById('escaped-message');
+
+        // Sound Synthesis (Tone.js)
+        let synth; // Declare synth globally
+        let scrollSoundSynth; // Synth for scroll feedback
+
+        // --- Initialization ---
+        function init() {
+            // Basic Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111); // Dark background
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 10;
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            container.appendChild(renderer.domElement); // Add canvas to the container
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xaaaaaa); // Soft white light
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.7);
+            directionalLight.position.set(5, 10, 7.5);
+            scene.add(directionalLight);
+
+            // Create Objects (Cubes)
+            const geometry = new THREE.BoxGeometry(1, 1, 1);
+            const colors = [0xff0000, 0x00ff00, 0x0000ff]; // Red, Green, Blue
+
+            for (let i = 0; i < 3; i++) {
+                const material = new THREE.MeshStandardMaterial({
+                    color: colors[i],
+                    metalness: 0.3,
+                    roughness: 0.6
+                });
+                const cube = new THREE.Mesh(geometry, material);
+                // Store initial random data for unique movement patterns
+                cube.userData = {
+                    offset: Math.random() * Math.PI * 2, // Phase offset for oscillation
+                    speed: 0.5 + Math.random() * 0.5,    // Speed multiplier
+                    axis: i // Which axis it primarily moves on (0=x, 1=y, 2=z - kinda)
+                };
+                cubes.push(cube);
+                scene.add(cube);
+            }
+
+            // Initialize Sound (requires user interaction to start AudioContext)
+            container.addEventListener('click', initSound, { once: true });
+            container.addEventListener('wheel', initSound, { once: true }); // Also init on scroll
+
+            // Event Listeners
+            window.addEventListener('resize', onWindowResize, false);
+            window.addEventListener('wheel', onScroll, { passive: false }); // Use wheel event
+
+            // Start Animation Loop
+            animate();
+        }
+
+        // --- Sound Initialization ---
+        function initSound() {
+            if (Tone.context.state !== 'running') {
+                Tone.start(); // Start the audio context if not already running
+            }
+            if (!synth) { // Create synth only once
+                 synth = new Tone.PolySynth(Tone.Synth, {
+                    oscillator: { type: 'triangle' },
+                    envelope: { attack: 0.01, decay: 0.1, sustain: 0.2, release: 0.5 }
+                }).toDestination();
+            }
+             if (!scrollSoundSynth) { // Create scroll synth only once
+                scrollSoundSynth = new Tone.Synth({
+                    oscillator: { type: 'sine' },
+                    volume: -20, // Quieter sound
+                    envelope: { attack: 0.005, decay: 0.05, sustain: 0, release: 0.1 }
+                }).toDestination();
+            }
+            console.log("Audio Initialized");
+        }
+
+        // --- Event Handlers ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onScroll(event) {
+            event.preventDefault(); // Prevent page scrolling
+
+            if (isEscaped) return; // Stop time manipulation after escape
+
+            const scrollDelta = event.deltaY;
+            timeProgress += scrollDelta * scrollSensitivity;
+
+            // Clamp timeProgress between 0 and maxTime
+            timeProgress = Math.max(0, Math.min(maxTime, timeProgress));
+
+            // Play subtle scroll sound
+            if (scrollSoundSynth && Tone.context.state === 'running') {
+                const freq = 440 + (timeProgress / maxTime) * 440; // Pitch changes with time
+                 scrollSoundSynth.triggerAttackRelease(freq, '32n'); // Short note
+            }
+        }
+
+        // --- Animation Logic ---
+        function updateObjects() {
+            if (isEscaped) return; // Freeze objects after escape
+
+            const normalizedTime = timeProgress / maxTime; // Time between 0 and 1
+
+            cubes.forEach((cube, index) => {
+                const { offset, speed, axis } = cube.userData;
+                const angle = normalizedTime * Math.PI * 2 * speed + offset;
+
+                // Calculate target position based on time (simple oscillation)
+                // We want them to align at the center (0,0,0) at the escapeTime
+                const targetTimeNormalized = escapeTime / maxTime;
+                const timeFactor = Math.sin((normalizedTime - targetTimeNormalized) * Math.PI); // 0 at escape time, +/- 1 elsewhere
+
+                // Move along different axes based on index
+                if (axis === 0) { // Red cube moves along X
+                    cube.position.x = timeFactor * 5; // Oscillate between -5 and 5
+                    cube.position.y = 0;
+                    cube.position.z = 0;
+                } else if (axis === 1) { // Green cube moves along Y
+                    cube.position.x = 0;
+                    cube.position.y = timeFactor * 5;
+                    cube.position.z = 0;
+                } else { // Blue cube moves along Z (towards/away from camera)
+                    cube.position.x = 0;
+                    cube.position.y = 0;
+                    cube.position.z = timeFactor * 3; // Smaller range for Z
+                }
+
+                // Add some rotation based on time
+                cube.rotation.x = angle * 0.5;
+                cube.rotation.y = angle * 0.3;
+            });
+        }
+
+        // --- Check Win Condition ---
+        function checkWinCondition() {
+            if (isEscaped) return;
+
+            // Check if time is close to the escape time
+            if (Math.abs(timeProgress - escapeTime) < 1.0) { // Check within a small time window
+                let aligned = true;
+                cubes.forEach(cube => {
+                    // Check if each cube's position is close to the origin (0,0,0)
+                    if (cube.position.length() > alignmentTolerance) {
+                        aligned = false;
+                    }
+                });
+
+                if (aligned) {
+                    escapeLoop();
+                }
+            }
+        }
+
+        // --- Escape Action ---
+        function escapeLoop() {
+            if (isEscaped) return; // Only trigger once
+            console.log("Escaped!");
+            isEscaped = true;
+            escapedMessageDiv.style.display = 'block'; // Show success message
+
+             // Play success sound
+            if (synth && Tone.context.state === 'running') {
+                const now = Tone.now();
+                synth.triggerAttackRelease('C4', '8n', now);
+                synth.triggerAttackRelease('E4', '8n', now + 0.2);
+                synth.triggerAttackRelease('G4', '4n', now + 0.4);
+                synth.triggerAttackRelease('C5', '2n', now + 0.8);
+            }
+
+            // Maybe change background or add effects here
+            scene.background = new THREE.Color(0x339933); // Greenish background on escape
+        }
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate); // Loop
+
+            if (!isEscaped) {
+                updateObjects(); // Update object positions based on timeProgress
+                checkWinCondition(); // Check if alignment is achieved
+            }
+
+            // Update UI
+            timeValueSpan.textContent = timeProgress.toFixed(2);
+
+            // Render the scene
+            renderer.render(scene, camera);
+        }
+
+        // --- Start ---
+         // Use window.onload to ensure everything is loaded, especially fonts and libraries
+        window.onload = function() {
+            init();
+        };
+
+    </script>
+</body>
+</html>
